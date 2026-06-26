@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.cognee_system/
+cognee_data/
+*.db
+.DS_Store
+.pytest_cache/
+node_modules/
+dist/

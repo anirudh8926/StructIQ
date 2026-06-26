@@ -1,0 +1,10 @@
+cognee
+ifcopenshell
+pdfplumber
+chromadb
+sentence-transformers
+fastapi
+uvicorn
+python-multipart
+pydantic>=2.0
+python-dotenv
