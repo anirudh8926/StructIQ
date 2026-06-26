@@ -21,8 +21,8 @@ _CHUNKS: list[str] = []
 
 def _seed_chunks() -> list[str]:
     out = []
-    for c in standards.SEED_CLAUSES:
-        out.append(f"IS 456 Clause {c.clause_id} {c.title}. {c.applicability}. "
+    for code, c in standards.all_clauses():
+        out.append(f"{code} Clause {c.clause_id} {c.title}. {c.applicability}. "
                    f"Formula: {c.formula}.")
     return out
 
@@ -42,7 +42,7 @@ def _ensure_index(pdf_path: Optional[str] = None) -> None:
         client = chromadb.Client()
         ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-MiniLM-L6-v2")
-        col = client.get_or_create_collection("is456", embedding_function=ef)
+        col = client.get_or_create_collection("standards", embedding_function=ef)
         if col.count() == 0:
             col.add(documents=_CHUNKS, ids=[f"c{i}" for i in range(len(_CHUNKS))])
         _COLLECTION = col

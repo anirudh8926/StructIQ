@@ -10,3 +10,6 @@ cognee_data/
 .pytest_cache/
 node_modules/
 dist/
+
+# Derived standards artifact — regenerable from the PDF, don't commit
+data/standards/*.txt
