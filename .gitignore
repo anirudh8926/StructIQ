@@ -13,3 +13,6 @@ dist/
 
 # Derived standards artifact — regenerable from the PDF, don't commit
 data/standards/*.txt
+
+
+README.md

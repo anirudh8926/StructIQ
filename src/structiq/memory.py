@@ -31,7 +31,12 @@ OLLAMA_BASE = os.environ.get("OLLAMA_BASE", "http://localhost:11434")
 OLLAMA_LLM = os.environ.get("STRUCTIQ_OLLAMA_LLM", "llama3.2:3b")
 EMBED_MODEL = os.environ.get("STRUCTIQ_EMBED_MODEL", "nomic-embed-text")
 
-_DEFAULT_CLOUD_MODEL = {"openai": "gpt-4o-mini", "anthropic": "claude-3-5-haiku-20241022"}
+NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
+_DEFAULT_CLOUD_MODEL = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-haiku-20241022",
+    "nvidia": "meta/llama-3.3-70b-instruct",
+}
 
 _STATE: dict = {"ingested_source": None, "llm_mode": None}
 _T = TypeVar("_T")
@@ -49,21 +54,49 @@ def _load_dotenv() -> None:
 
 
 def _cloud_spec() -> Optional[dict]:
-    """Resolve the cloud LLM (provider, model, key) from env, or None if no key."""
+    """Resolve the cloud LLM from env, or None if no usable key.
+
+    Returns provider (as Cognee/LiteLLM should see it), model, key, optional endpoint,
+    and a human label. NVIDIA NIM is OpenAI-compatible: provider 'openai' + a custom
+    endpoint + an 'openai/<model>' name so LiteLLM uses the custom base_url.
+    """
     _load_dotenv()
-    provider = os.environ.get("LLM_PROVIDER", "").lower() or None
-    key = os.environ.get("LLM_API_KEY") or ""
-    if provider in (None, "ollama"):
-        if os.environ.get("OPENAI_API_KEY"):
-            provider, key = "openai", os.environ["OPENAI_API_KEY"]
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            provider, key = "anthropic", os.environ["ANTHROPIC_API_KEY"]
+    explicit = os.environ.get("LLM_PROVIDER", "").lower() or None
+    model = os.environ.get("LLM_MODEL") or None
+    endpoint = os.environ.get("LLM_ENDPOINT") or None
+
+    nv = os.environ.get("NVIDIA_API_KEY") or ""
+    oa = os.environ.get("OPENAI_API_KEY") or ""
+    an = os.environ.get("ANTHROPIC_API_KEY") or ""
+    explicit_key = os.environ.get("LLM_API_KEY") or ""
+
+    # Decide which cloud provider + key, honoring explicit config first.
+    if explicit in (None, "ollama"):
+        if nv or oa.startswith("nvapi-"):   # NVIDIA NIM (OpenAI-compatible)
+            provider, key = "nvidia", (nv or oa)
+        elif oa:
+            provider, key = "openai", oa
+        elif an:
+            provider, key = "anthropic", an
+        elif explicit_key and explicit_key != "ollama":
+            provider, key = "openai", explicit_key
         else:
             return None
-    if not key or key == "ollama":
-        return None
-    model = os.environ.get("LLM_MODEL") or _DEFAULT_CLOUD_MODEL.get(provider, "gpt-4o-mini")
-    return {"provider": provider, "model": model, "key": key}
+    else:
+        provider = explicit
+        key = explicit_key or nv or oa or an
+        if not key or key == "ollama":
+            return None
+
+    if provider == "nvidia":
+        model = model or _DEFAULT_CLOUD_MODEL["nvidia"]
+        litellm_model = model if model.startswith("openai/") else f"openai/{model}"
+        return {"provider": "openai", "model": litellm_model, "key": key,
+                "endpoint": endpoint or NVIDIA_BASE, "label": f"nvidia/{model}"}
+
+    model = model or _DEFAULT_CLOUD_MODEL.get(provider, "gpt-4o-mini")
+    return {"provider": provider, "model": model, "key": key,
+            "endpoint": endpoint, "label": f"{provider}/{model}"}
 
 
 def _configure_common() -> None:
@@ -98,7 +131,10 @@ def _apply_llm(mode: str) -> None:
         os.environ["LLM_PROVIDER"] = spec["provider"]
         os.environ["LLM_MODEL"] = spec["model"]
         os.environ["LLM_API_KEY"] = spec["key"]
-        os.environ.pop("LLM_ENDPOINT", None)  # let the provider use its default endpoint
+        if spec.get("endpoint"):
+            os.environ["LLM_ENDPOINT"] = spec["endpoint"]  # custom base (e.g. NVIDIA NIM)
+        else:
+            os.environ.pop("LLM_ENDPOINT", None)  # provider's default endpoint
     else:
         os.environ["LLM_PROVIDER"] = "ollama"
         os.environ["LLM_MODEL"] = OLLAMA_LLM
@@ -142,7 +178,7 @@ def available() -> tuple[bool, str]:
     has_local_llm = any(OLLAMA_LLM.split(":")[0] in n for n in names)
     if not cloud and not has_local_llm:
         return False, f"no cloud key and ollama missing '{OLLAMA_LLM}'"
-    where = f"cloud:{cloud['provider']}/{cloud['model']}" if cloud else f"ollama/{OLLAMA_LLM}"
+    where = f"cloud:{cloud['label']}" if cloud else f"ollama/{OLLAMA_LLM}"
     return True, f"ready (LLM primary: {where}; embeddings: ollama/{EMBED_MODEL})"
 
 
