@@ -26,8 +26,9 @@ flawed → B3 turns red, and clicking it shows the clause path that explains why
 8. [Design decision: why compliance needs no LLM](#8-design-decision-why-compliance-needs-no-llm)
 9. [Can we trust an LLM to generate the graph?](#9-can-we-trust-an-llm-to-generate-the-graph)
 10. [Experiment: LLM-draft extraction from the real IS 456 PDF](#10-experiment-llm-draft-extraction-from-the-real-is-456-pdf)
-11. [Demo script](#11-demo-script)
-12. [Roadmap / next steps](#12-roadmap--next-steps)
+11. [The Cognee memory layer (LLM Q&A)](#11-the-cognee-memory-layer-llm-qa)
+12. [Demo script](#12-demo-script)
+13. [Roadmap / next steps](#13-roadmap--next-steps)
 
 ---
 
@@ -66,6 +67,9 @@ Data flow end to end:
    /model` is the single backend↔frontend contract.
 5. **3D view** ([frontend/](frontend/)) — Vite + React + react-three-fiber renders the frame;
    members are boxes colored green (pass) / red (fail), click-to-inspect shows the clause path.
+6. **Memory layer (optional)** ([src/structiq/memory.py](src/structiq/memory.py)) — Cognee
+   stores the *verified* model as graph+vector memory; `POST /ask` answers natural-language
+   questions grounded in it via an LLM. Sits outside the verdict path (see §11).
 
 ### The worked example (beam B3)
 
@@ -99,7 +103,8 @@ src/structiq/
   graph.py           # the join + deterministic traversal (in-memory StructGraph)
   compliance.py      # pure traversal + verdict assembly (NO rules here)
   baseline.py        # ChromaDB / keyword flat-RAG baseline (the weak contrast)
-  api.py             # FastAPI: /upload /check /model /baseline /health
+  memory.py          # Cognee memory layer: ingest verified model + LLM Q&A (cloud + Ollama)
+  api.py             # FastAPI: /upload /check /model /baseline /ask /memory/status /health
   standards/
     base.py          # Standard dataclass, registry, result shapes, check primitives
     is456.py         # IS 456:2000 as data + numeric checks (the rules live HERE)
@@ -109,7 +114,7 @@ scripts/
   inspect_graph.py   # print the joined graph for hand inspection
   extract_clauses.py # dump the PDF text layer + show clause context (see §10)
 frontend/            # Vite + React + react-three-fiber
-  src/components/{Scene,MemberMesh,InspectPanel,UploadBar,BaselinePanel}.tsx
+  src/components/{Scene,MemberMesh,InspectPanel,UploadBar,BaselinePanel,AskPanel}.tsx
   src/api.ts         # typed client mirroring GET /model
 data/
   ifc/{frame_clean,frame_flawed}.ifc   # generated demo models
@@ -144,6 +149,9 @@ in `frontend/` and the FastAPI app serves `frontend/dist` at http://localhost:80
 pytest          # clean B3 passes; flawed B3 fails Cl 26.5.1.1 with a clause path
 ```
 
+> The optional **Cognee memory layer** (`/ask`) has its own heavier setup (a short-path venv
+> + Ollama + an optional cloud key) — see §11.
+
 ---
 
 ## 6. Build status — what's real vs. fallback
@@ -159,10 +167,13 @@ demo's critical path.
 | FastAPI (`/upload`, `/check`, `/model`, `/baseline`) | ✅ done |
 | Three.js (Vite + r3f) 3D viewer, click-to-inspect | ✅ done & verified in-browser |
 | Standards graph | ⚠️ **curated seed** (hand-authored), not parsed from the PDF |
-| Cognee graph memory | ⚠️ **not wired** — runs on the in-memory graph; `try_cognify` is a no-op hook |
 | ChromaDB flat-RAG baseline | ⚠️ **keyword fallback** — `chromadb`/`sentence-transformers` not installed |
+| Cognee memory layer + `/ask` (LLM Q&A) | 🔄 **wired** — proven end-to-end locally; cloud (OpenAI/Anthropic) + Ollama-fallback routing done; live cloud run + AskPanel test pending (§11, §13) |
+| Frontend AskPanel | 🔄 built; not yet tested against a live `/ask` |
 
-The reasons these are fallbacks (and why that's the right call) are in §8–§10.
+Note the compliance *join* deliberately stays an in-memory `StructGraph` (deterministic, §2);
+Cognee is a *separate* memory layer for Q&A, never the verdict path. The reasons the other
+rows are fallbacks (and why that's the right call) are in §8–§11.
 
 ---
 
@@ -287,21 +298,110 @@ question and justifies the architecture.
 
 ---
 
-## 11. Demo script
+## 11. The Cognee memory layer (LLM Q&A)
+
+§§8–10 establish where the LLM must *not* go — verdicts and unverified extraction. This is where
+it legitimately lives: a natural-language Q&A layer grounded in **Cognee** as the memory store.
+(Cognee is the hackathon sponsor; this satisfies the "use Cognee as an LLM memory layer"
+requirement without touching the deterministic core.)
+
+**Trust boundary (unchanged):** the engine computes verdicts deterministically and *writes the
+verified facts* (members, clauses, verdicts, clause paths) into Cognee. The LLM only
+**retrieves and explains** what's already in memory — it never computes pass/fail.
+
+```
+DETERMINISTIC CORE (source of truth)
+  IFC → Members → StructGraph → compliance → verdicts + clause paths
+        │  write verified facts as memory
+        ▼
+COGNEE MEMORY LAYER              [src/structiq/memory.py]
+  cognify() → graph + vector memory
+        │  grounded retrieval
+        ▼
+LLM Q&A   [POST /ask, GET /memory/status; frontend AskPanel]
+  "Why did B3 fail? What change makes it pass?" → answer grounded in memory
+```
+
+One question, three answers — the contrast that makes the point:
+
+| Source | "Does B3 meet minimum tension steel?" |
+|---|---|
+| Deterministic engine | `FAIL, Cl 26.5.1.1, 157 < 196` (the truth) |
+| Flat-RAG baseline | garbled clause text, no verdict |
+| Cognee-memory LLM | *"B3 fails minimum tension steel (Cl 26.5.1.1) — 157 mm² vs 196 required; 4-T16 (804 mm²) would comply."* |
+
+### Provider strategy
+
+Embeddings and the LLM are split so failover is safe:
+
+| | Provider | Why |
+|---|---|---|
+| **Embeddings** | **always local Ollama** (`nomic-embed-text`, 768-dim) | never the bottleneck; fixed so the persisted vector store stays valid no matter which LLM answers |
+| **LLM** | **cloud primary → Ollama fallback** | the LLM is the bottleneck and is stateless per call, so it fails over to local `llama3.2:3b` on rate-limit / API error |
+
+The cloud LLM is auto-detected from `.env` (see [.env.example](.env.example)):
+- `OPENAI_API_KEY=sk-...` → OpenAI, default `gpt-4o-mini`
+- `ANTHROPIC_API_KEY=sk-ant-...` → Anthropic, default `claude-3-5-haiku`
+- no key → fully local Ollama (slower)
+
+### Why a cloud LLM at all — the latency finding
+
+A full local run (`llama3.2:3b`) proved the architecture end-to-end and returned the correct
+grounded answer, but `cognify` took **~90 minutes** and the 3B repeatedly emitted invalid graph
+JSON (auto-retried). The bottleneck is the LLM, not Cognee's storage. A fast cloud model drops
+that to ~1–2 min with reliable structured output; the local model stays as the rate-limit
+backdoor.
+
+### Setup
+
+Cognee is heavy and trips a Windows 260-char path limit under the Store-Python `site-packages`,
+so it lives in a **short-path venv**:
+
+```bash
+python -m venv C:/sqenv
+C:/sqenv/Scripts/python -m pip install -r requirements.txt transformers
+ollama pull llama3.2:3b && ollama pull nomic-embed-text
+# optional: add a cloud key to .env (see .env.example), then run the backend on the venv:
+PYTHONPATH=src C:/sqenv/Scripts/python -m uvicorn structiq.api:app --port 8000
+```
+
+`GET /memory/status` reports readiness and whether a cloud key was detected. Embeddings use
+Ollama's `/api/embed`; Cognee's Ollama embedder needs a HF tokenizer for token-counting only
+(`HUGGINGFACE_TOKENIZER=bert-base-uncased`). If Cognee/Ollama are absent, `/ask` degrades
+gracefully and the deterministic core is unaffected.
+
+**Status:** the memory layer + `/ask` are wired and proven end-to-end locally; cloud + Ollama
+fallback routing is implemented. The live cloud run and the frontend AskPanel test are pending
+(§13).
+
+---
+
+## 12. Demo script
 
 1. Open the 3D view. Upload `frame_clean.ifc` → **Check against IS 456** → frame is all green.
 2. Upload `frame_flawed.ifc` → **Check** → B3 turns red (6 pass, 1 fail).
 3. Click **B3** → the inspect panel shows the verdict (`As_prov=157 < As_min=196 mm²`) and the
    clause path: Member B3 → IS 456 Cl 26.5.1.1 → safety factors → Verdict.
 4. Open the **Flat-RAG baseline** panel, ask the same question → it returns clause text with no
-   verdict bound to B3. That gap is the pitch.
+   verdict bound to B3.
+5. Open the **Ask (Cognee-memory LLM)** panel, ask the same question → a grounded
+   natural-language answer built from Cognee's memory of the verified model. Three answers on
+   one screen — the gap (baseline) vs. the grounding (Cognee) is the pitch.
 
 ---
 
-## 12. Roadmap / next steps
+## 13. Roadmap / next steps
 
+**Finish the memory layer (§11):**
+- **Live cloud run** — add a key to `.env`, confirm `cognify` + `/ask` are fast (~1–2 min) and
+  reliable, and verify the Ollama rate-limit fallback.
+- **Wire the frontend AskPanel** against the live `/ask`, with a sane loading/timeout state.
+- **Persist + pre-build memory** so `/ask` reuses an existing Cognee store instead of
+  re-`cognify`-ing on each model change or backend restart.
+
+**Other:**
 - **Wire the PDF into the flat-RAG baseline** (no LLM/key needed) so the contrast panel shows
-  real-PDF retrieval vs. the graph verdict. Highest-payoff use of the PDF.
+  real-PDF retrieval vs. the graph verdict.
 - **Clause provenance** in the inspect panel (deterministic `pdfplumber` text next to a verdict).
 - **A second code** (ACI 318 / Eurocode 2) via the registry (§7): same building, switch the
   code, contrasting verdicts.
