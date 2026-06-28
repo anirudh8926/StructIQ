@@ -70,3 +70,32 @@ export async function baseline(q: string): Promise<BaselineResponse> {
   if (!r.ok) throw new Error(`GET /baseline ${r.status}`)
   return r.json()
 }
+
+// --- Cognee-memory LLM Q&A ---
+
+export interface AskResponse {
+  available: boolean
+  status: string
+  answer: string | null
+  source?: string
+  backend?: string
+}
+
+export interface MemoryStatus {
+  available: boolean
+  status: string
+  ingested_source: string | null
+  backend: string
+}
+
+export async function memoryStatus(): Promise<MemoryStatus> {
+  const r = await fetch('/memory/status')
+  if (!r.ok) throw new Error(`GET /memory/status ${r.status}`)
+  return r.json()
+}
+
+export async function ask(q: string): Promise<AskResponse> {
+  const r = await fetch(`/ask?q=${encodeURIComponent(q)}`, { method: 'POST' })
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `ask ${r.status}`)
+  return r.json()
+}

@@ -4,6 +4,7 @@ import Scene from './components/Scene'
 import InspectPanel from './components/InspectPanel'
 import UploadBar from './components/UploadBar'
 import BaselinePanel from './components/BaselinePanel'
+import AskPanel from './components/AskPanel'
 import './App.css'
 
 export default function App() {
@@ -62,7 +63,10 @@ export default function App() {
           {model && (
             <Scene members={model.members} selected={selected} onSelect={setSelected} />
           )}
-          <BaselinePanel />
+          <div className="overlays">
+            <AskPanel />
+            <BaselinePanel />
+          </div>
         </div>
         <InspectPanel member={selectedMember} />
       </main>

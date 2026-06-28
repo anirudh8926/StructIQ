@@ -99,6 +99,27 @@ def baseline_query(q: str) -> dict:
     return baseline.query(q)
 
 
+@app.get("/memory/status")
+def memory_status() -> dict:
+    from . import memory
+    return memory.status()
+
+
+@app.post("/ask")
+async def ask(q: str) -> dict:
+    """Natural-language Q&A grounded in Cognee's memory of the VERIFIED model.
+
+    The verdict itself is computed deterministically (here, ensured via check()); the LLM
+    only retrieves and explains it from Cognee. Verdict logic never runs in the LLM.
+    """
+    from . import memory
+    if not _STATE["members"]:
+        raise HTTPException(400, "no model loaded — POST /upload first")
+    if not _STATE["results"]:
+        check()  # ensure deterministic verdicts exist before they go into memory
+    return await memory.ask_async(q, model())
+
+
 # Optionally load a default model on startup so GET /model works before any upload.
 def _maybe_load_default() -> None:
     here = os.path.dirname(os.path.abspath(__file__))
